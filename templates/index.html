@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WoL Manager</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f2f5;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: auto;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+            color: #007bff;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 12px;
+            border-bottom: 1px solid #ddd;
+            text-align: left;
+        }
+        th {
+            background-color: #f7f7f7;
+        }
+        .actions {
+            white-space: nowrap;
+        }
+        button {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-right: 5px;
+        }
+        .btn-wol { background-color: #28a745; color: white; }
+        .btn-edit { background-color: #ffc107; color: #333; }
+        .btn-delete { background-color: #dc3545; color: white; }
+        .form-section {
+            margin-top: 30px;
+            padding: 20px;
+            background-color: #f7f7f7;
+            border-radius: 8px;
+        }
+        h2 {
+            margin-top: 0;
+        }
+        input[type="text"] {
+            width: calc(100% - 24px);
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        .form-actions {
+            text-align: right;
+        }
+        #notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background-color: #28a745;
+            color: white;
+            padding: 15px;
+            border-radius: 5px;
+            display: none;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            z-index: 1000;
+        }
+        #notification.error {
+            background-color: #dc3545;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>WoL Manager</h1>
+        
+        <div id="device-list">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>MAC Address</th>
+                        <th class="actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="device-table-body">
+                    <!-- Devices will be populated by JavaScript -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="form-section">
+            <h2 id="form-title">Add New Device</h2>
+            <form id="device-form">
+                <input type="hidden" id="device-id">
+                <input type="text" id="device-name" placeholder="Device Name (e.g., Gaming PC)" required>
+                <input type="text" id="device-mac" placeholder="MAC Address (e.g., 00:11:22:33:44:55)" required>
+                <div class="form-actions">
+                    <button type="submit" class="btn-wol">Save Device</button>
+                    <button type="button" id="cancel-edit" style="display: none;">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="notification"></div>
+
+    <script>
+        const API_BASE_URL = '/api';
+        const form = document.getElementById('device-form');
+        const formTitle = document.getElementById('form-title');
+        const deviceIdInput = document.getElementById('device-id');
+        const deviceNameInput = document.getElementById('device-name');
+        const deviceMacInput = document.getElementById('device-mac');
+        const cancelEditBtn = document.getElementById('cancel-edit');
+        const tableBody = document.getElementById('device-table-body');
+        const notification = document.getElementById('notification');
+
+        // --- Notifications ---
+        function showNotification(message, isError = false) {
+            notification.textContent = message;
+            notification.className = isError ? 'error' : '';
+            notification.style.display = 'block';
+            setTimeout(() => {
+                notification.style.display = 'none';
+            }, 3000);
+        }
+
+        // --- API Calls ---
+        async function getDevices() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/devices`);
+                if (!response.ok) throw new Error('Failed to fetch devices');
+                const devices = await response.json();
+                renderDevices(devices || []);
+            } catch (error) {
+                showNotification(error.message, true);
+            }
+        }
+
+        async function saveDevice(id, name, mac) {
+            const isEditing = id !== '';
+            const url = isEditing ? `${API_BASE_URL}/devices/${id}` : `${API_BASE_URL}/devices`;
+            const method = isEditing ? 'PUT' : 'POST';
+
+            try {
+                const response = await fetch(url, {
+                    method: method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id, name, mac })
+                });
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(isEditing ? 'Failed to update device' : 'Failed to add device' + `: ${errorText}`);
+                }
+                showNotification(`Device ${isEditing ? 'updated' : 'saved'} successfully!`);
+                resetForm();
+                getDevices();
+            } catch (error) {
+                showNotification(error.message, true);
+            }
+        }
+
+        async function deleteDevice(id) {
+            if (!confirm('Are you sure you want to delete this device?')) return;
+            try {
+                const response = await fetch(`${API_BASE_URL}/devices/${id}`, { method: 'DELETE' });
+                if (!response.ok) throw new Error('Failed to delete device');
+                showNotification('Device deleted successfully!');
+                getDevices();
+            } catch (error) {
+                showNotification(error.message, true);
+            }
+        }
+
+        async function sendWol(mac) {
+            try {
+                const response = await fetch(`${API_BASE_URL}/wol`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mac })
+                });
+                if (!response.ok) {
+                     const errorText = await response.text();
+                    throw new Error(`Failed to send WoL packet: ${errorText}`);
+                }
+                showNotification(`WoL packet sent to ${mac}`);
+            } catch (error) {
+                showNotification(error.message, true);
+            }
+        }
+        
+        // --- UI Rendering & Event Handlers ---
+        function renderDevices(devices) {
+            tableBody.innerHTML = '';
+            if (!devices || devices.length === 0) {
+                const row = tableBody.insertRow();
+                const cell = row.insertCell();
+                cell.colSpan = 3;
+                cell.textContent = 'No devices saved yet.';
+                cell.style.textAlign = 'center';
+                return;
+            }
+            devices.forEach(device => {
+                const row = tableBody.insertRow();
+                row.innerHTML = `
+                    <td>${escapeHTML(device.name)}</td>
+                    <td>${escapeHTML(device.mac)}</td>
+                    <td class="actions">
+                        <button class="btn-wol" onclick="sendWol('${escapeHTML(device.mac)}')">Wake Up</button>
+                        <button class="btn-edit" onclick="editDevice('${escapeHTML(device.id)}', '${escapeHTML(device.name)}', '${escapeHTML(device.mac)}')">Edit</button>
+                        <button class="btn-delete" onclick="deleteDevice('${escapeHTML(device.id)}')">Delete</button>
+                    </td>
+                `;
+            });
+        }
+
+        function editDevice(id, name, mac) {
+            formTitle.textContent = 'Edit Device';
+            deviceIdInput.value = id;
+            deviceNameInput.value = name;
+            deviceMacInput.value = mac;
+            cancelEditBtn.style.display = 'inline-block';
+            window.scrollTo(0, document.body.scrollHeight);
+        }
+
+        function resetForm() {
+            form.reset();
+            formTitle.textContent = 'Add New Device';
+            deviceIdInput.value = '';
+            cancelEditBtn.style.display = 'none';
+        }
+        
+        function escapeHTML(str) {
+            return str.replace(/[&<>"']/g, function(match) {
+                return {
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#39;'
+                }[match];
+            });
+        }
+
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const macRegex = /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/;
+            if (!macRegex.test(deviceMacInput.value)) {
+                showNotification('Invalid MAC address format. Use XX:XX:XX:XX:XX:XX or XX-XX-XX-XX-XX-XX.', true);
+                return;
+            }
+            saveDevice(deviceIdInput.value, deviceNameInput.value, deviceMacInput.value);
+        });
+
+        cancelEditBtn.addEventListener('click', resetForm);
+
+        // Initial load
+        document.addEventListener('DOMContentLoaded', getDevices);
+    </script>
+</body>
+</html>

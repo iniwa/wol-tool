@@ -1,254 +1,213 @@
 package main
 
 import (
-	"database/sql"
-	"embed"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"io/fs"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"regexp"
 	"strconv"
-	"strings"
-
-	"github.com/gin-gonic/gin"
-	_ "github.com/mattn/go-sqlite3"
+	"sync"
+	"time"
 )
 
-//go:embed index.html
-var embeddedFiles embed.FS
-
-var db *sql.DB
-var appPort = os.Getenv("APP_PORT")
-
-// Device はデータベースのdevicesテーブルを表す構造体
+// Device represents a machine that can be woken up
 type Device struct {
-	ID   int64  `json:"id"`
+	ID   string `json:"id"`
 	Name string `json:"name"`
-	Mac  string `json:"mac"`
+	MAC  string `json:"mac"`
 }
+
+var (
+	devices     []Device
+	devicesFile = "/app/data/devices.json"
+	mutex       = &sync.Mutex{}
+)
 
 func main() {
-	if appPort == "" {
-		appPort = "8090"
+	// Adjust file path for local development
+	if _, err := os.Stat("/app/data"); os.IsNotExist(err) {
+		devicesFile = "data/devices.json"
 	}
 
-	// データベースの初期化
-	var err error
-	// 実行時のカレントディレクトリ(Dockerfileで/app/dataに設定)にDBファイルが作られる
-	db, err = sql.Open("sqlite3", "./devices.db")
-	if err != nil {
-		log.Fatalf("データベースを開けませんでした: %v", err)
-	}
-	defer db.Close()
+	loadDevices()
 
-	// テーブルの作成
-	createTableSQL := `CREATE TABLE IF NOT EXISTS devices (
-		"id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-		"name" TEXT NOT NULL,
-		"mac" TEXT NOT NULL UNIQUE
-	);`
-	if _, err = db.Exec(createTableSQL); err != nil {
-		log.Fatalf("テーブルを作成できませんでした: %v", err)
-	}
-	log.Println("データベースの準備ができました。")
+	http.HandleFunc("/", serveTemplate)
+	http.HandleFunc("/api/devices", devicesHandler)
+	http.HandleFunc("/api/devices/", deviceHandler)
+	http.HandleFunc("/api/wol", wolHandler)
 
-	// Ginルーターのセットアップ
-	router := gin.Default()
-
-	// APIエンドポイント
-	api := router.Group("/api")
-	{
-		api.GET("/devices", getDevices)
-		api.POST("/devices", addDevice)
-		api.PUT("/devices/:id", updateDevice)
-		api.DELETE("/devices/:id", deleteDevice)
-		api.POST("/wakeup/:id", wakeDevice)
-	}
-
-	// フロントエンドの提供（修正版）
-	// 静的ファイルをルートで提供する場合、APIと競合しないよう明示的にハンドリング
-	router.GET("/", func(c *gin.Context) {
-		c.FileFromFS("index.html", http.FS(embeddedFiles))
-	})
-
-	// サーバーの起動
-	log.Printf("サーバー起動: http://localhost:%s\n", appPort)
-	if err := router.Run(":" + appPort); err != nil {
-		log.Fatalf("サーバーの起動に失敗しました: %v", err)
+	log.Println("Starting server on :8090")
+	if err := http.ListenAndServe(":8090", nil); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
 	}
 }
 
-// getDevices はすべてのデバイスを取得
-func getDevices(c *gin.Context) {
-	rows, err := db.Query("SELECT id, name, mac FROM devices ORDER BY id")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+func serveTemplate(w http.ResponseWriter, r *http.Request) {
+	// Adjust file path for local development
+	templatePath := "templates/index.html"
+	if _, err := os.Stat("templates"); os.IsNotExist(err) {
+		templatePath = "/app/templates/index.html"
 	}
-	defer rows.Close()
+	http.ServeFile(w, r, templatePath)
+}
 
-	devices := []Device{}
-	for rows.Next() {
-		var d Device
-		if err := rows.Scan(&d.ID, &d.Name, &d.Mac); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+// --- Device Handlers ---
+
+func devicesHandler(w http.ResponseWriter, r *http.Request) {
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	switch r.Method {
+	case http.MethodGet:
+		json.NewEncoder(w).Encode(devices)
+	case http.MethodPost:
+		var device Device
+		if err := json.NewDecoder(r.Body).Decode(&device); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		devices = append(devices, d)
+		device.ID = strconv.FormatInt(time.Now().UnixNano(), 10)
+		devices = append(devices, device)
+		saveDevices()
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(device)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
-	c.JSON(http.StatusOK, devices)
 }
 
-// addDevice は新しいデバイスを追加
-func addDevice(c *gin.Context) {
-	var newDevice Device
-	if err := c.BindJSON(&newDevice); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "入力データが不正です"})
-		return
-	}
+func deviceHandler(w http.ResponseWriter, r *http.Request) {
+	mutex.Lock()
+	defer mutex.Unlock()
 
-	// MACアドレスのバリデーション
-	if !validateMAC(newDevice.Mac) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "MACアドレスの形式が正しくありません (例: 00:11:22:33:44:55)"})
-		return
-	}
-
-	stmt, err := db.Prepare("INSERT INTO devices(name, mac) VALUES(?, ?)")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	res, err := stmt.Exec(newDevice.Name, newDevice.Mac)
-	if err != nil {
-		// SQLiteのユニーク制約違反をチェック
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			c.JSON(http.StatusConflict, gin.H{"error": "このMACアドレスは既に登録されています"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	id := r.URL.Path[len("/api/devices/"):]
+	index := -1
+	for i, d := range devices {
+		if d.ID == id {
+			index = i
+			break
 		}
+	}
+
+	if index == -1 {
+		http.Error(w, "Device not found", http.StatusNotFound)
 		return
 	}
 
-	id, _ := res.LastInsertId()
-	newDevice.ID = id
-	c.JSON(http.StatusCreated, newDevice)
-}
-
-// updateDevice は既存のデバイスを更新
-func updateDevice(c *gin.Context) {
-	id := c.Param("id")
-	var device Device
-	if err := c.BindJSON(&device); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "入力データが不正です"})
-		return
-	}
-
-	// MACアドレスのバリデーション
-	if !validateMAC(device.Mac) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "MACアドレスの形式が正しくありません"})
-		return
-	}
-
-	stmt, err := db.Prepare("UPDATE devices SET name = ?, mac = ? WHERE id = ?")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	_, err = stmt.Exec(device.Name, device.Mac, id)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			c.JSON(http.StatusConflict, gin.H{"error": "このMACアドレスは既に登録されています"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	switch r.Method {
+	case http.MethodPut:
+		var updatedDevice Device
+		if err := json.NewDecoder(r.Body).Decode(&updatedDevice); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
-		return
+		updatedDevice.ID = id // Ensure ID remains the same
+		devices[index] = updatedDevice
+		saveDevices()
+		json.NewEncoder(w).Encode(updatedDevice)
+	case http.MethodDelete:
+		devices = append(devices[:index], devices[index+1:]...)
+		saveDevices()
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
-
-	idInt, _ := strconv.ParseInt(id, 10, 64)
-	device.ID = idInt
-	c.JSON(http.StatusOK, device)
 }
 
-// deleteDevice はデバイスを削除
-func deleteDevice(c *gin.Context) {
-	id := c.Param("id")
-	stmt, err := db.Prepare("DELETE FROM devices WHERE id = ?")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+// --- WoL Handler ---
+
+func wolHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	_, err = stmt.Exec(id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+
+	var req struct {
+		MAC string `json:"mac"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Device deleted"})
+
+	if err := sendMagicPacket(req.MAC); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to send magic packet: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Magic packet sent to %s", req.MAC)
 }
 
-// wakeDevice はWoLパケットを送信
-func wakeDevice(c *gin.Context) {
-	id := c.Param("id")
-	var macAddr string
-	err := db.QueryRow("SELECT mac FROM devices WHERE id = ?", id).Scan(&macAddr)
+// --- Helper Functions ---
+
+func loadDevices() {
+	mutex.Lock()
+	defer mutex.Unlock()
+	file, err := ioutil.ReadFile(devicesFile)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if os.IsNotExist(err) {
+			log.Printf("'%s' not found, starting with empty device list.", devicesFile)
+			devices = []Device{}
+			return
 		}
-		return
+		log.Fatalf("Failed to read devices file: %v", err)
 	}
-	
-	err = sendMagicPacket(macAddr)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	if err := json.Unmarshal(file, &devices); err != nil {
+		log.Fatalf("Failed to parse devices file: %v", err)
 	}
-	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Magic packet sent to %s", macAddr)})
+	log.Printf("Loaded %d devices from '%s'", len(devices), devicesFile)
 }
 
-// sendMagicPacket はWoLマジックパケットを生成して送信（コンテナ対応版）
+func saveDevices() {
+	data, err := json.MarshalIndent(devices, "", "  ")
+	if err != nil {
+		log.Printf("Error marshalling devices: %v", err)
+		return
+	}
+	if err := ioutil.WriteFile(devicesFile, data, 0644); err != nil {
+		log.Printf("Error writing devices file: %v", err)
+	}
+}
+
 func sendMagicPacket(macAddr string) error {
-	macAddr = strings.ReplaceAll(macAddr, ":", "")
-	macAddr = strings.ReplaceAll(macAddr, "-", "")
-	macBytes, err := hex.DecodeString(macAddr)
-	if err != nil || len(macBytes) != 6 {
+	// Validate MAC address
+	macPattern := `^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`
+	if match, _ := regexp.MatchString(macPattern, macAddr); !match {
 		return fmt.Errorf("invalid MAC address format: %s", macAddr)
 	}
+	
+	macBytes, err := net.ParseMAC(macAddr)
+	if err != nil {
+		return err
+	}
 
-	// マジックパケットのペイロードを作成
-	packet := make([]byte, 6, 102)
+	// Build the magic packet
+	packet := make([]byte, 102)
+	// First 6 bytes of 0xFF
 	for i := 0; i < 6; i++ {
 		packet[i] = 0xFF
 	}
-	for i := 0; i < 16; i++ {
-		packet = append(packet, macBytes...)
+	// Repeat MAC address 16 times
+	for i := 1; i <= 16; i++ {
+		copy(packet[i*6:(i+1)*6], macBytes)
 	}
 
-	// コンテナ環境でも動作しやすいよう ListenPacket を使用
-	pc, err := net.ListenPacket("udp4", ":0")
+	// Broadcast the packet
+	conn, err := net.Dial("udp", "255.255.255.255:9")
 	if err != nil {
-		return fmt.Errorf("ListenPacket failed: %w", err)
+		// Try another broadcast address for different network configurations
+		conn, err = net.Dial("udp", "192.168.1.255:9") // Common subnet, adjust if needed
+		if err != nil {
+			return fmt.Errorf("failed to connect for UDP broadcast: %v", err)
+		}
 	}
-	defer pc.Close()
+	defer conn.Close()
 
-	// ブロードキャスト送信
-	bcastAddr := &net.UDPAddr{IP: net.IPv4bcast, Port: 9}
-	_, err = pc.WriteTo(packet, bcastAddr)
-	if err != nil {
-		return fmt.Errorf("WriteTo failed: %w", err)
-	}
-	
-	log.Printf("Sent magic packet to %s", macAddr)
-	return nil
-}
-
-// validateMAC はMACアドレスの形式をチェック
-func validateMAC(mac string) bool {
-	regex := regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`)
-	return regex.MatchString(mac)
+	_, err = conn.Write(packet)
+	return err
 }
