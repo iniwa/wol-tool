@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
 	"github.com/gin-gonic/gin"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -56,8 +57,7 @@ func main() {
 	log.Println("データベースの準備ができました。")
 
 	// Ginルーターのセットアップ
-
-    router := gin.Default()
+	router := gin.Default()
 
 	// APIエンドポイント
 	api := router.Group("/api")
@@ -69,16 +69,22 @@ func main() {
 		api.POST("/wakeup/:id", wakeDevice)
 	}
 
-	// フロントエンドの提供（修正箇所）
-	// ルートパスでindex.htmlを返す
+	// フロントエンドの提供（修正版）
+	// 静的ファイルをルートで提供する場合、APIと競合しないよう明示的にハンドリング
 	router.GET("/", func(c *gin.Context) {
 		c.FileFromFS("index.html", http.FS(embeddedFiles))
 	})
 
+	// サーバーの起動
+	log.Printf("サーバー起動: http://localhost:%s\n", appPort)
+	if err := router.Run(":" + appPort); err != nil {
+		log.Fatalf("サーバーの起動に失敗しました: %v", err)
+	}
+}
+
 // getDevices はすべてのデバイスを取得
 func getDevices(c *gin.Context) {
-
-rows, err := db.Query("SELECT id, name, mac FROM devices ORDER BY id")
+	rows, err := db.Query("SELECT id, name, mac FROM devices ORDER BY id")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -205,7 +211,7 @@ func wakeDevice(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Magic packet sent to %s", macAddr)})
 }
 
-// sendMagicPacket はWoLマジックパケットを生成して送信
+// sendMagicPacket はWoLマジックパケットを生成して送信（コンテナ対応版）
 func sendMagicPacket(macAddr string) error {
 	macAddr = strings.ReplaceAll(macAddr, ":", "")
 	macAddr = strings.ReplaceAll(macAddr, "-", "")
@@ -223,15 +229,14 @@ func sendMagicPacket(macAddr string) error {
 		packet = append(packet, macBytes...)
 	}
 
-	// Docker等のコンテナ環境ではブロードキャストアドレスへのDialが失敗しやすいため
-	// net.ListenPacketを使用して特定のインターフェースに縛られずに送信する
+	// コンテナ環境でも動作しやすいよう ListenPacket を使用
 	pc, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
 		return fmt.Errorf("ListenPacket failed: %w", err)
 	}
 	defer pc.Close()
 
-	// ブロードキャストアドレスへ送信
+	// ブロードキャスト送信
 	bcastAddr := &net.UDPAddr{IP: net.IPv4bcast, Port: 9}
 	_, err = pc.WriteTo(packet, bcastAddr)
 	if err != nil {
@@ -241,9 +246,9 @@ func sendMagicPacket(macAddr string) error {
 	log.Printf("Sent magic packet to %s", macAddr)
 	return nil
 }
+
 // validateMAC はMACアドレスの形式をチェック
 func validateMAC(mac string) bool {
-	// 12桁の16進数、またはコロン/ハイフン区切りの形式を許容
 	regex := regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`)
 	return regex.MatchString(mac)
 }
