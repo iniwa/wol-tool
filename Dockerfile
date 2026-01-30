@@ -1,33 +1,36 @@
 # ステージ1: ビルド環境
 FROM golang:1.23-alpine AS builder
 
-# ビルドに必要なツールをインストール
+# SQLiteのビルドに必要なツールをインストール
 RUN apk add --no-cache build-base
 
 WORKDIR /app
 
-# go.modなどをコピー
+# 依存関係ファイルをコピー
 COPY go.mod ./
 
-# go.sumがなくても自動生成して依存関係を解決
+# 依存関係の解決（ソースコードコピーの前に実行して効率化）
 RUN go mod tidy && go mod download
 
 # ソースコードをコピー
 COPY . .
 
-# 静的リンクでビルド
-# -extldflags "-static" でCライブラリ依存をなくす
-RUN CGO_ENABLED=1 GOOS=linux go build -tags musl -ldflags="-s -w -extldflags '-static'" -o server .
+# 【修正】静的リンクオプションを削除し、標準ビルドに変更
+# これによりビルド時間が大幅に短縮され、ハングアップを防ぎます
+RUN go build -ldflags="-s -w" -o server .
 
 # ステージ2: 実行環境
 FROM alpine:latest
 
 WORKDIR /app
 
+# タイムゾーン情報などを追加（必須ではないですがあると便利です）
+RUN apk add --no-cache ca-certificates tzdata
+
 # ビルド成果物をコピー
 COPY --from=builder /app/server ./server
 
-# データディレクトリ
+# データディレクトリ作成
 RUN mkdir -p /app/data
 
 # 実行
