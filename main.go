@@ -69,18 +69,11 @@ func main() {
 		api.POST("/wakeup/:id", wakeDevice)
 	}
 
-	// フロントエンドの静的ファイルを提供
-	// embedしたファイルシステムから 'index.html' を含むサブツリーを取得
-	staticFiles, _ := fs.Sub(embeddedFiles, ".")
-	router.StaticFS("/", http.FS(staticFiles))
-
-
-	// サーバーの起動
-	log.Printf("サーバー起動: http://localhost:%s\n", appPort)
-	if err := router.Run(":" + appPort); err != nil {
-		log.Fatalf("サーバーの起動に失敗しました: %v", err)
-	}
-}
+	// フロントエンドの提供（修正箇所）
+	// ルートパスでindex.htmlを返す
+	router.GET("/", func(c *gin.Context) {
+		c.FileFromFS("index.html", http.FS(embeddedFiles))
+	})
 
 // getDevices はすべてのデバイスを取得
 func getDevices(c *gin.Context) {
@@ -221,7 +214,7 @@ func sendMagicPacket(macAddr string) error {
 		return fmt.Errorf("invalid MAC address format: %s", macAddr)
 	}
 
-	// マジックパケットのペイロードを作成 (6バイトの0xFF + 16回のMACアドレス)
+	// マジックパケットのペイロードを作成
 	packet := make([]byte, 6, 102)
 	for i := 0; i < 6; i++ {
 		packet[i] = 0xFF
@@ -230,36 +223,24 @@ func sendMagicPacket(macAddr string) error {
 		packet = append(packet, macBytes...)
 	}
 
-	// ブロードキャストアドレスにUDPで送信
-	conn, err := net.Dial("udp", "255.255.255.255:9")
+	// Docker等のコンテナ環境ではブロードキャストアドレスへのDialが失敗しやすいため
+	// net.ListenPacketを使用して特定のインターフェースに縛られずに送信する
+	pc, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
-		// net.Dialが失敗した場合、ブロードキャストをサポートしていないインターフェースかもしれない
-		// 代わりにListenPacketとWriteToで試みる
-		log.Println("net.Dial failed, trying with ListenPacket...")
-		pc, err := net.ListenPacket("udp4", ":0") // ローカルの任意のポートから送信
-		if err != nil {
-			return fmt.Errorf("ListenPacket failed: %w", err)
-		}
-		defer pc.Close()
+		return fmt.Errorf("ListenPacket failed: %w", err)
+	}
+	defer pc.Close()
 
-		bcastAddr := &net.UDPAddr{IP: net.IPv4bcast, Port: 9}
-		_, err = pc.WriteTo(packet, bcastAddr)
-		if err != nil {
-			return fmt.Errorf("pc.WriteTo failed: %w", err)
-		}
-
-	} else {
-		defer conn.Close()
-		_, err = conn.Write(packet)
-		if err != nil {
-			return fmt.Errorf("conn.Write failed: %w", err)
-		}
+	// ブロードキャストアドレスへ送信
+	bcastAddr := &net.UDPAddr{IP: net.IPv4bcast, Port: 9}
+	_, err = pc.WriteTo(packet, bcastAddr)
+	if err != nil {
+		return fmt.Errorf("WriteTo failed: %w", err)
 	}
 	
 	log.Printf("Sent magic packet to %s", macAddr)
 	return nil
 }
-
 // validateMAC はMACアドレスの形式をチェック
 func validateMAC(mac string) bool {
 	// 12桁の16進数、またはコロン/ハイフン区切りの形式を許容

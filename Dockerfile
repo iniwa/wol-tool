@@ -1,34 +1,34 @@
 # ステージ1: ビルド環境
 FROM golang:1.23-alpine AS builder
 
-# SQLiteのビルド(CGO)に必要なツールをインストール
+# CGO（SQLite）ビルドに必要なコンパイラをインストール
 RUN apk add --no-cache build-base
-
-ENV CGO_ENABLED=1
-ENV GOOS=linux
-ENV GOARCH=arm64
 
 WORKDIR /app
 
-# 全ファイルをコピー（main.go, index.html, go.mod等）
+# 先にgo.mod/go.sumだけをコピーして依存関係を解決（キャッシュ効率化）
+COPY go.mod ./
+# go.sumがない場合に生成し、依存関係をダウンロード
+RUN go mod tidy && go mod download
+
+# ソースコードをコピー
 COPY . .
 
-# 依存関係を整理してgo.sumを修復し、ビルドを実行
-RUN go mod tidy && \
-    go build -ldflags="-s -w" -o server .
+# 静的リンクでビルド
+# -ldflags="-s -w -extldflags '-static'" により、実行時に外部ライブラリを不要にする
+RUN CGO_ENABLED=1 GOOS=linux go build -tags musl -ldflags="-s -w -extldflags '-static'" -o server .
 
 # ステージ2: 実行環境
 FROM alpine:latest
-# SQLiteとGoバイナリの実行に必要なライブラリを追加
-RUN apk add --no-cache ca-certificates libc6-compat
 
+# 静的リンク済みなのでライブラリ追加は不要だが、デバッグ用に基本ツールはあっても良い
 WORKDIR /app
-# ビルド済みバイナリを適切な場所にコピー
+
+# ビルド済みバイナリをコピー
 COPY --from=builder /app/server ./server
 
-# データディレクトリ作成
+# データ保存用ディレクトリ
 RUN mkdir -p /app/data
-WORKDIR /app/data
 
-# サーバーを実行
+# 実行
 CMD ["/app/server"]
