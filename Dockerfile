@@ -8,7 +8,8 @@ RUN go build -o main .
 FROM scratch
 WORKDIR /app
 COPY --from=builder /app/main .
-COPY --from=builder /app/templates ./templates
+# 修正箇所: templatesフォルダではなく、ルートにあるindex.htmlをコピーします
+COPY --from=builder /app/index.html .
 
 EXPOSE 8090
 CMD ["/app/main"]
