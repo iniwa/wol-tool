@@ -48,9 +48,9 @@ func main() {
 
 func serveTemplate(w http.ResponseWriter, r *http.Request) {
 	// Adjust file path for local development
-	templatePath := "templates/index.html"
+	templatePath := "index.html"
 	if _, err := os.Stat("templates"); os.IsNotExist(err) {
-		templatePath = "/app/templates/index.html"
+		templatePath = "/app/index.html"
 	}
 	http.ServeFile(w, r, templatePath)
 }
