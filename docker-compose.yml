@@ -1,0 +1,7 @@
+services:
+  wol-app:
+    build: .
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./data:/app/data
