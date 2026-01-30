@@ -1,0 +1,10 @@
+services:
+  wol-server:
+    build: .
+    container_name: wol-server
+    restart: always
+    network_mode: host
+    # 永続化の設定: ホストの./dataディレクトリをコンテナの/app/dataにマウント
+    # これにより、コンテナを再作成してもデータベースファイル(devices.db)が保持される
+    volumes:
+      - ./data:/app/data
