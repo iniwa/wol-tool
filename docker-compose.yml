@@ -6,4 +6,4 @@ services:
     volumes:
       - ./data:/app/data
     labels:
-      - com.centurylinklabs.watchtower.enable:"false",
+      com.centurylinklabs.watchtower.enable: "false"
