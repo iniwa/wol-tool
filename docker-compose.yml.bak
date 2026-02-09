@@ -1,7 +1,6 @@
 services:
   wol-app:
     container_name: wol-app
-    build: .
     network_mode: host
     volumes:
       - ./data:/app/data

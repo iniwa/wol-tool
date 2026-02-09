@@ -164,6 +164,47 @@
         #notification.error {
             background-color: var(--danger-color);
         }
+
+        /* Mobile Responsive Layout */
+        @media (max-width: 600px) {
+            body { padding: 10px; }
+            .container { padding: 15px; }
+
+            /* Hide table headers */
+            thead { display: none; }
+
+            /* Card view for rows */
+            tr {
+                display: block;
+                margin-bottom: 15px;
+                border: 1px solid var(--border-color);
+                border-radius: 8px;
+                padding: 15px;
+                background-color: #252525;
+            }
+
+            td {
+                display: block;
+                border: none;
+                padding: 4px 0;
+            }
+
+            /* Adjust specific columns */
+            td:first-child { font-size: 1.1rem; margin-bottom: 4px; }
+            td:nth-child(2) { margin-bottom: 12px; }
+
+            /* Action buttons container */
+            td.actions {
+                display: flex;
+                gap: 10px;
+            }
+
+            .actions button {
+                flex: 1;
+                margin-right: 0;
+                padding: 10px;
+            }
+        }
     </style>
 </head>
 <body>
